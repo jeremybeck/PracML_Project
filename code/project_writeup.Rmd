@@ -53,18 +53,10 @@ Since the classes are balanced fairly well, we can move forward with a random sa
 
 # Initial Variable Formatting and Removal
 
--LIST OUT MISSING VALES FOR EACH OF THESE COLUMNS-
-```{r}
-
-
-```
-
-There are a lot of columns where the overwhelming majority of values are NA. For the time-being, I am going to get rid of any column where there are fewer than 20% of the observations that have a real value. After that is carried out, I will remove any columns that have either low or near-zero variance, using caret's nearZeroVar() function. 
+From a quick visual inspection of the data, it was clear there are many columns where the overwhelming majority of values are NA. For the time-being, I am going to get rid of any column where there are fewer than 20% of the observations that have a real value. After that is carried out, I will remove any columns that have either low or near-zero variance, using caret's nearZeroVar() function. 
 
 ```{r}
 
- # Get Rid of Zero-Variance Predictors
-  
   # Remove columns with 80% missing
   train <- train[lapply(train, function(x){sum(is.na(x)) / length(x)} ) < 0.2 ]
 
