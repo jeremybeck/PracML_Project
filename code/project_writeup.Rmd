@@ -1,0 +1,234 @@
+---
+title: "Practical Machine Learning Project"
+author: "Jeremy Beck"
+date: "November 19, 2015"
+output: html_document
+---
+
+# Summary
+
+This document will document the EDA and model generation for the course project of the Practical Machine Learning Course of the Data Science Specialization.  For this project we are utilizing an Human Activity Recognition data set that tracks a series of users performing curls with both proper form, as well as several common mistakes. The paper for the study can be located [at this location](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf).  The links to the data sets used for training and evaluation are provided in the markdown document below. 
+
+# Data Loading and Parsing
+
+```{r, cache=TRUE} 
+# And now the data load
+{
+  download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', 
+                '../data/pml-training.csv', method='curl') 
+  
+  train_data <- read.csv('../data/pml-training.csv', header=T, quote='"', na.strings=c("NA","","#DIV/0!"))
+}
+
+
+```
+
+Now the first thing I wanted to check, was how many classes we are predicting, and whether or not the classes are balanced.  If classes were highly imbalanced, that may affect our sampling methodology. 
+
+```{r, echo=F, message=F}
+# Loading Libraries
+  library(caret)
+  library(knitr)
+  library(ggplot2)
+  library(dplyr)
+  library(randomForest)
+
+  table(train_data$classe)
+  
+```
+
+Since the classes are balanced fairly well, we can move forward with a random sampling of the training set. I performed a 75:25 split between training and test sets. I will use the 75% to parse data and train a model using cross-validation.  I will not even peek a little bit at any of the variables in the test set until I am brave enough to test my model. 
+
+```{r}
+{
+  set.seed(42)
+  training.idx <- createDataPartition(train_data$X, p=0.75, list=F)
+  
+  train <- train_data[training.idx,]
+  test_set <- train_data[-training.idx,]
+  
+}
+```
+
+
+# Initial Variable Formatting and Removal
+
+-LIST OUT MISSING VALES FOR EACH OF THESE COLUMNS-
+```{r}
+
+
+```
+
+There are a lot of columns where the overwhelming majority of values are NA. For the time-being, I am going to get rid of any column where there are fewer than 20% of the observations that have a real value. After that is carried out, I will remove any columns that have either low or near-zero variance, using caret's nearZeroVar() function. 
+
+```{r}
+
+ # Get Rid of Zero-Variance Predictors
+  
+  # Remove columns with 80% missing
+  train <- train[lapply(train, function(x){sum(is.na(x)) / length(x)} ) < 0.2 ]
+
+  # Remove columns with near or zero variance
+  train.nzv <- nearZeroVar(train)
+  train.filtered <- train[-train.nzv]
+  
+  dim(train.filtered)
+```
+
+I also want to drop any 'identifier' columns from the data set, since we won't want to include them in the predictors set.
+
+```{r}
+  # And we get rid of the "key" columns to identify participants
+  # I can't find a detailed codebook to tell me what "num_window" is, but I am suspicious of it given 
+  # it's placement in file with the other ID vars. For the time being, we'll exclude it from the 
+  # analysis. The documentation suggests it may be related to the time-windows the authors used in 
+  # their study to define features/measurements. Better safe than sorry!
+  key.cols <- grep("^X$|user_name|raw_timestamp_part_1|raw_timestamp_part_2|cvtd_timestamp|num_window",
+                   names(train.filtered))
+  
+  train.filtered <- train.filtered[-key.cols]
+
+```
+
+Now I am thinking that I am going to use a random forest for the machine learning model. Multicolinearity won't generally kill the predictivity of a random forest, but it can definitely inflate the variable importance of highly-colinear variables.  I will print them here to see which variables pop up, and if they are highly predictive in the final model, I will be mindful of that. 
+
+```{r, echo=F}  
+  # Let's look at the correlation betweeen predictors
+  trainCor <- cor(train.filtered[-grep("classe",names(train.filtered))])
+  
+  names(train.filtered)[findCorrelation(trainCor, cutoff = .75)]
+
+  # We could knock them out like this, but I'll revisit that again if things aren't looking good. 
+  #train.filtered <- train.filtered[-findCorrelation(trainCor, cutoff=0.75)]
+  
+```
+
+Since we are dealing with a tree-based method, I won't need to do a ton of other preprocessing. The splits in the underlying CART model are not affected by monotonic transformations in predictor values, and so I don't need to worry about normality or removing outlier values right now. So let's move forward and start investigating some models. 
+
+
+# Initial Step at Modeling
+
+Our first crack at this will be a randomForest. We will perform 10-fold cross-validation using caret's trainControl() functionality.  Cross-validation will serve two purposes:
+
+  1) Estimate what I should expect the range of performance to be across multiple samples of a training set
+  2) Test several variations of hyperparameters on the randomForest algorithm. (In this case, the mtry variable, which is the number of randomly selected  variables to consider at each split.) 
+  
+I will also set the ntree parameter to 100, which means the algorithm will train 100 independent trees. Although the default is 500, I've generally found respectable and consistent behaviour starting around 100.
+
+
+```{r, cache=TRUE, message=F}
+  
+  set.seed(1024)
+  
+  # We will still do Cross-Validation to estimate the stability of the model to repeated random samplings. 
+
+  ctrl <- trainControl(method="cv", number=10)
+
+  rf_mod <- train(classe ~ ., data=train.filtered, method='rf', ntree=100, trControl=ctrl)
+  
+  # Let's take a look at our models now:
+  
+  rf_mod
+
+```
+
+So the model tested several variations of mtry (2, 27, and 52), and found the best performance with mtry = 2.  The default for classification in randomForest is the square root of the number of predictors (in this case, 7), so that is lower than I would have expected. 
+
+Wow, the accuracy is 0.993 and the SD is 0.002.  That's a highly accurate model, and it does not seem to be affected by the sample the model was trained on in CV. **From that information, I'd expect the out-of-sample error rate to be very low - about half a percent.**  
+
+Let's take a look at the confusion matrix from cross-validation to see if there are any classes we need to worry about. 
+
+```{r, echo=F}  
+  confusionMatrix(rf_mod)
+
+```
+
+# Model Investigation - What is the Model Doing?
+
+We will quickly look at two diagnostics of the model:
+
+  1) The relative variable importance to classification in the random forest model (varImpPlot() function)
+  2) How the most influential variable affects classification (using the partialPlot() function)
+  
+First let's look at at the variable importance plot:
+```{r, echo=F, fig.height=7}
+  randomForest::varImpPlot(rf_mod$finalModel, main="Relative Variable importance in Final RF Model") 
+  
+```
+
+And now we'll use partialPlot to see the influence of the most important variable - roll_belt.  I'll echo code here so you can see the formatting. 
+
+```{r}
+  a_class_roll_belt <- partialPlot(rf_mod$finalModel, train.filtered, roll_belt, which.class="A", plot=F)
+  a_class_roll_belt <- as.data.frame(a_class_roll_belt) %>% mutate(CLASS = "A")
+  b_class_roll_belt <- partialPlot(rf_mod$finalModel, train.filtered, roll_belt, which.class="B", plot=F)
+  b_class_roll_belt <- as.data.frame(b_class_roll_belt) %>% mutate(CLASS = "B")
+  c_class_roll_belt <- partialPlot(rf_mod$finalModel, train.filtered, roll_belt, which.class="C", plot=F)
+  c_class_roll_belt <- as.data.frame(c_class_roll_belt) %>% mutate(CLASS = "C")
+  d_class_roll_belt <- partialPlot(rf_mod$finalModel, train.filtered, roll_belt, which.class="D", plot=F)
+  d_class_roll_belt <- as.data.frame(d_class_roll_belt) %>% mutate(CLASS = "D")
+  e_class_roll_belt <- partialPlot(rf_mod$finalModel, train.filtered, roll_belt, which.class="E", plot=F)
+  e_class_roll_belt <- as.data.frame(e_class_roll_belt) %>% mutate(CLASS = "E")
+
+  rollbelt_pplot <- rbind_all(list(a_class_roll_belt, b_class_roll_belt, c_class_roll_belt,
+                                   d_class_roll_belt, e_class_roll_belt))
+  
+  qplot(x, y, data=rollbelt_pplot, color=CLASS, geom='line', 
+        main="Influence of roll_belt Variable on Classification - RF Model", xlab="roll_belt value")
+  
+```
+
+The y-axis can be viewed as the likelihood of each class along the range of the variable.  Here we can see that at each extreme, the most likely class is "E", especially at the higher end of the range. So higher motion in the sensor located on the participant's belt (and therefore motion in the hips) sensor indicates class E, and if we look in the original publication, we can see that class E corresponds to respondent mistakenly throwing their hips forward.  That makes sense, and is a good way to look into what patterns the model is finding in the data. 
+
+
+# Test Set Evaluation
+
+Now that we've looked into the model performance using cross-validation, as well as a quick look at which variables are important, let's move on to evaluate on the 25% of the data we withheld to use as a test set. 
+
+```{r}
+# Test Set Evaluation
+# Let's Predict on the Test Set
+{
+  test_preds <- predict(rf_mod, newdata=test_set)
+
+  confusionMatrix(test_preds, test_set$classe)
+  
+}
+```
+
+Wow, model performance confirmed. Since these values look very similar to the cross-validated results, we can feel relatively confident that the model is not overfit. **Once again this accuracy confirms our findings from cross-validation - the out-of-sample error rate should be under 1%.** The last step is to evaluate on the 20 observations we are being graded on.
+
+
+# Final Submission Generation
+
+Here are the final submission files.  I have to admit, the submission process (one file at a time) was a little bit nerve-racking, but I got 20/20 on the first try!
+
+```{r, cache=TRUE}  
+# Now We Load the Test Set
+{
+  download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv', 
+                '../data/pml-testing.csv', method='curl') 
+
+  test_data <- read.csv('../data/pml-testing.csv', header=T, quote='"', na.strings=c("NA","","#DIV/0!"))
+
+}
+
+# And We Run some Test Predictions
+{
+
+  pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+      filename = paste0("../data/predictions/problem_id_",i,".txt")
+      write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+  }
+
+  testset_preds <- predict(rf_mod, newdata=test_data)
+
+  pml_write_files(as.character(testset_preds))
+  
+}
+
+```
+
